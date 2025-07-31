@@ -1,26 +1,21 @@
 # Core Deep Learning Libraries
-#torch==2.2.0
-#torchvision==0.17.2
-#torchaudio==2.2.2
+torch==2.2.0
+torchvision==0.17.2
+torchaudio==2.2.2
+torch-xla==2.2  # 💡 TPU support library
+
+# Transformers & NLP
 transformers>=4.30.0
-
-# Data Handling
-datasets>=2.12.0
-scikit-learn>=1.2.0
-pandas>=1.5.0
-numpy>=1.24.0
-
-# Image Processing
-Pillow>=9.5.0
-opencv-python>=4.7.0
-imageio>=2.31.0
-tqdm>=4.65.0
-
-# Text Processing
+tokenizers>=0.13.3
 sentencepiece>=0.1.99
 nltk>=3.8.0
 spacy>=3.6.0
-tokenizers>=0.13.3
+
+# Data Handling
+datasets>=2.12.0
+pandas>=1.5.0
+numpy>=1.24.0
+scikit-learn>=1.2.0
 
 # Evaluation Metrics
 bert-score>=0.3.13
@@ -29,7 +24,13 @@ evaluate>=0.4.0
 lpips>=0.1.4
 scipy>=1.10.0
 
-# Visualization & Experiment Tracking
+# Image Processing
+Pillow>=9.5.0
+opencv-python>=4.7.0
+imageio>=2.31.0
+tqdm>=4.65.0
+
+# Visualization & Tracking
 matplotlib>=3.7.0
 seaborn>=0.12.2
 tensorboard>=2.13.0
@@ -38,10 +39,6 @@ wandb>=0.15.5
 # Diffusion Model Support
 diffusers>=0.19.3
 accelerate>=0.21.0
-
-# Multimodal / Hybrid Support
-#clip @ git+https://github.com/openai/CLIP.git
-
 
 # Jupyter & Dev Tools
 jupyterlab>=4.0.0
@@ -52,3 +49,6 @@ ipython>=8.14.0
 # Miscellaneous
 pyyaml>=6.0
 regex>=2023.6.3
+
+# Optional CLIP support (uncomment if needed)
+# clip @ git+https://github.com/openai/CLIP.git
