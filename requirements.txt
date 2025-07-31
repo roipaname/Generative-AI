@@ -1,8 +1,8 @@
 # Core Deep Learning Libraries
-torch==2.2.0
+torch==2.2.2
 torchvision==0.17.2
 torchaudio==2.2.2
-torch-xla==2.2  # 💡 TPU support library
+torch-xla==2.2 # 💡 TPU support library
 
 # Transformers & NLP
 transformers>=4.30.0
