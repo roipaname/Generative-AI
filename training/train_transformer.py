@@ -6,6 +6,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from datasets import load_dataset
+import traceback
 
 import torch_xla
 import torch_xla.core.xla_model as xm
@@ -175,9 +176,10 @@ def full_train_fn(rank):
             print("Training completed successfully!")
             
     except Exception as e:
-        print(f"Process {rank} full training error: {e}")
-        import traceback
+        print(f"[Rank {rank}] Exception occurred: {e}")
         traceback.print_exc()
+        import os, signal
+        os.kill(os.getpid(), signal.SIGTERM) 
 
 if __name__ == "__main__":
     print("Starting TPU training debug...")
@@ -194,7 +196,7 @@ if __name__ == "__main__":
     # Then test full training
     print("\n=== Testing full training functionality ===")
     try:
-        xmp.spawn(full_train_fn, args=(), nprocs=None, start_method='spawn')
+        xmp.spawn(full_train_fn, args=(), nprocs=1, start_method='spawn')
         print("Full training test passed!")
     except Exception as e:
         print(f"Full training test failed: {e}")
