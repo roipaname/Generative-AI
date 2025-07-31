@@ -131,5 +131,6 @@ def train_fn(rank, flags):
         print("Saved QA model checkpoint.")
 
 if __name__ == "__main__":
-    # Launch training on 8 TPU cores
-    xmp.spawn(train_fn, args=({},), nprocs=8, start_method='fork')
+    import torch_xla.distributed.xla_multiprocessing as xmp
+    xmp.spawn(train_fn, args=(), nprocs=8, start_method='fork')
+
