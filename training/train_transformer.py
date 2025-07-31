@@ -7,12 +7,14 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from datasets import load_dataset
 import wandb
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+import torch_xla
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.xla_multiprocessing as xmp
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from models.transformer.transformer import TransformerModel
 from models.transformer.QA_transformer import QA_TransformerModel
-
 
 # Hyperparameters
 vocab_size = 30522
@@ -25,14 +27,9 @@ batch_size = 128
 epochs = 3
 lr = 3e-4
 
-
-# Initialize tokenizer
+# Initialize tokenizer and dataset (load once)
 tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-
-# Load dataset (SQuAD for testing)
 dataset = load_dataset("squad")
-
-
 
 class QADataset(torch.utils.data.Dataset):
     def __init__(self, dataset):
@@ -82,41 +79,57 @@ class QADataset(torch.utils.data.Dataset):
             'end_positions': end_pos
         }
 
+def train_fn(rank, flags):
+    # rank: TPU core id (0-7 for 8 TPU cores)
+    device = xm.xla_device()
 
-# Use QADataset class here (as defined in Step 2)
-train_dataset = QADataset(dataset["train"])
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    # Create dataset and DataLoader with distributed sampler
+    train_dataset = QADataset(dataset["train"])
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataset,
+        num_replicas=8,
+        rank=rank,
+        shuffle=True
+    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size // 8, sampler=train_sampler, drop_last=True)
 
-# Model, optimizer, loss
-model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-criterion = nn.CrossEntropyLoss()
+    # Model, optimizer, loss
+    model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
 
-wandb.init(project="transformer-qa", name="qa-training")
+    # Initialize wandb only in main process
+    if rank == 0:
+        wandb.init(project="transformer-qa", name="qa-training-tpu")
 
-# Training loop
-for epoch in range(epochs):
-    model.train()
-    for i, batch in enumerate(train_loader):
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        start_positions = batch['start_positions'].to(device)
-        end_positions = batch['end_positions'].to(device)
+    for epoch in range(epochs):
+        model.train()
+        train_sampler.set_epoch(epoch)
+        for i, batch in enumerate(train_loader):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            start_positions = batch['start_positions'].to(device)
+            end_positions = batch['end_positions'].to(device)
 
-        start_logits, end_logits = model(input_ids, mask=attention_mask)
-        loss_start = criterion(start_logits, start_positions)
-        loss_end = criterion(end_logits, end_positions)
-        loss = (loss_start + loss_end) / 2
+            optimizer.zero_grad()
+            start_logits, end_logits = model(input_ids, mask=attention_mask)
+            loss_start = criterion(start_logits, start_positions)
+            loss_end = criterion(end_logits, end_positions)
+            loss = (loss_start + loss_end) / 2
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            loss.backward()
+            xm.optimizer_step(optimizer)  # TPU-specific optimizer step
 
-        if i % 50 == 0:
-            print(f"Epoch {epoch+1} Step {i} Loss: {loss.item():.4f}")
-            wandb.log({"loss": loss.item(), "epoch": epoch+1})
+            if i % 50 == 0 and rank == 0:
+                print(f"Epoch {epoch+1} Step {i} Loss: {loss.item():.4f}")
+                wandb.log({"loss": loss.item(), "epoch": epoch+1})
 
-# Save checkpoint
-os.makedirs("checkpoints", exist_ok=True)
-torch.save(model.state_dict(), "checkpoints/qa_transformer.pt")
-print("Saved QA model checkpoint.")
+    # Save checkpoint only on rank 0 process
+    if rank == 0:
+        os.makedirs("checkpoints", exist_ok=True)
+        xm.save(model.state_dict(), "checkpoints/qa_transformer_tpu.pt")
+        print("Saved QA model checkpoint.")
+
+if __name__ == "__main__":
+    # Launch training on 8 TPU cores
+    xmp.spawn(train_fn, args=({},), nprocs=8, start_method='fork')
