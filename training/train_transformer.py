@@ -21,7 +21,7 @@ d_model = 512
 num_heads = 8
 d_ff = 2048
 num_layers = 6
-batch_size = 32
+batch_size = 128
 epochs = 3
 lr = 3e-4
 
