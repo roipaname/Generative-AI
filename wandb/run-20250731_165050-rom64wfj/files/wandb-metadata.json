@@ -1,0 +1,32 @@
+{
+  "os":  "macOS-13.7.6-x86_64-i386-64bit",
+  "python":  "CPython 3.10.18",
+  "startedAt":  "2025-07-31T14:50:50.715747Z",
+  "args":  [
+    "--dataset",
+    "cnn_dailymail"
+  ],
+  "program":  "/Users/roipaname/Desktop/Generative AI/training/train_transformer.py",
+  "codePath":  "training/train_transformer.py",
+  "codePathLocal":  "training/train_transformer.py",
+  "git":  {
+    "remote":  "https://github.com/roipaname/Generative-AI.git",
+    "commit":  "86b9574413af4f5ae2ac25d947e754ab3a9e8efc"
+  },
+  "email":  "ebebeclarence55@gmail.com",
+  "root":  "/Users/roipaname/Desktop/Generative AI",
+  "host":  "rois-MacBook-Pro.local",
+  "executable":  "/Users/roipaname/Desktop/Generative AI/venv/bin/python",
+  "cpu_count":  2,
+  "cpu_count_logical":  4,
+  "disk":  {
+    "/":  {
+      "total":  "250685575168",
+      "used":  "227017388032"
+    }
+  },
+  "memory":  {
+    "total":  "8589934592"
+  },
+  "writerId":  "3ft92nga1gvrul1cytoq6c2eg08d4c2t"
+}

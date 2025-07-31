@@ -48,7 +48,9 @@ train_data = SimpleDataset(dataset["train"])
 loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, drop_last=True)
 
 # Initialize model, loss, optimizer
-model = TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).cuda()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
+
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
@@ -63,7 +65,8 @@ for epoch in range(epochs):
     model.train()
     total_loss = 0
     for i, (x, y) in enumerate(loader):
-        x, y = x.cuda(), y.cuda()
+        x, y = x.to(device), y.to(device)
+
         logits = model(x)
 
         # Reshape for loss computation
