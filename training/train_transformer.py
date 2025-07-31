@@ -82,6 +82,7 @@ class QADataset(torch.utils.data.Dataset):
 def train_fn(rank, flags):
     # rank: TPU core id (0-7 for 8 TPU cores)
     device = xm.xla_device()
+    print(f"Running on device: {device}, rank: {rank}")
 
     # Create dataset and DataLoader with distributed sampler
     train_dataset = QADataset(dataset["train"])
