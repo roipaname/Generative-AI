@@ -31,10 +31,12 @@ def main():
 
         print("Running dummy forward pass...")
         # Create dummy input tensor (batch_size=2, seq_len=10, d_model)
-        dummy_input = torch.randn(2, 10, d_model).to(device)
+       # Create dummy token IDs tensor of shape (batch_size=2, seq_len=10), dtype long (integers)
+        dummy_input = torch.randint(0, vocab_size, (2, 10), dtype=torch.long).to(device)
 
-        # Forward pass (adjust if your model input is different)
+# Forward pass
         output = model(dummy_input)
+
         print("Forward pass output:", output)
 
         print("Simple TPU test passed!")
