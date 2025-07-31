@@ -8,7 +8,8 @@ bleu = load_metric("bleu")
 rouge = load_metric("rouge")
 
 model = TransformerModel(vocab_size=30522)
-model.load_state_dict(torch.load("path/to/your/model.pt"))
+model.load_state_dict(torch.load("checkpoints/transformer.pt", map_location=torch.device))
+
 model.eval()
 model.cuda()
 
