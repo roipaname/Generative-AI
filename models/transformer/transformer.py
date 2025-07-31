@@ -15,16 +15,14 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
 
     def forward(self, x, mask=None, return_hidden=False):
-       x = self.token_emb(x)
-       x = self.pos_emb(x)
-       for layer in self.layers:
-         x = layer(x, mask)
-       x = self.norm(x)
-    
-       if return_hidden:
-         return x  # (B, L, d_model) — used for QA
-       else:
-        return self.output_proj(x)  # (B, L, vocab_size) — used for LM
+      x = self.token_emb(x)
+      x = self.pos_emb(x)
+      for layer in self.layers:
+        x = layer(x, mask)
+      x = self.norm(x)
+      if return_hidden:
+        return x  # hidden states before projection
+      return self.output_proj(x)
 
 
 class TransformerModel(nn.Module):
