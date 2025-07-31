@@ -59,7 +59,8 @@ def simple_train_fn(rank):
         # Test basic tensor operations
         print(f"Process {rank}: Testing tensor operations...")
         test_tensor = torch.randn(2, 10, d_model).to(device)
-        output = model.encoder(test_tensor)
+        output = model(test_tensor)
+
         print(f"Process {rank}: Tensor operations successful")
         
         print(f"Process {rank}: Completed successfully")
