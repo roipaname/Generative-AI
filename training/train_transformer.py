@@ -25,7 +25,7 @@ except Exception as e:
 # Test imports
 print("Testing model imports...")
 try:
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    sys.path.append(os.path.abspath(os.path.dirname(__file__)))
     from models.transformer.QA_transformer import QA_TransformerModel
     print("Model import successful")
 except Exception as e:
@@ -58,8 +58,9 @@ def simple_train_fn(rank):
         
         # Test basic tensor operations
         print(f"Process {rank}: Testing tensor operations...")
-        test_tensor = torch.randn(2, 10, d_model).to(device)
+        test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
         output = model(test_tensor)
+
 
         print(f"Process {rank}: Tensor operations successful")
         
