@@ -1,13 +1,17 @@
+# simple_test.py
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import sys
 import torch
+import torch_xla
 import torch_xla.core.xla_model as xm
 
-# Adjust this import path as needed
-sys.path.append('./models/transformer')
-from QA_transformer import QA_TransformerModel  # Make sure this path is correct
+# Set path to import custom model
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'models/transformer')))
+from models.transformer.QA_transformer import QA_TransformerModel
 
-# Hyperparameters (adjust to match your model)
+# Config
 vocab_size = 30522
 max_len = 384
 d_model = 512
@@ -17,34 +21,17 @@ num_layers = 6
 
 def main():
     print("Testing TPU connectivity...")
-    try:
-        device = xm.xla_device()
-        print(f"Using device: {device}")
-    except Exception as e:
-        print(f"Failed to get TPU device: {e}")
-        sys.exit(1)
-    
-    try:
-        print("Creating model...")
-        model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
-        print("Model created successfully")
+    device = xm.xla_device()
+    print(f"Using device: {device}")
 
-        print("Running dummy forward pass...")
-        # Create dummy input tensor (batch_size=2, seq_len=10, d_model)
-       # Create dummy token IDs tensor of shape (batch_size=2, seq_len=10), dtype long (integers)
-        dummy_input = torch.randint(0, vocab_size, (2, 10), dtype=torch.long).to(device)
+    print("Creating model...")
+    model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
+    print("Model created successfully")
 
-# Forward pass
-        output = model(dummy_input)
-
-        print("Forward pass output:", output)
-
-        print("Simple TPU test passed!")
-
-    except Exception as e:
-        print(f"Error during model forward pass: {e}")
-        import traceback
-        traceback.print_exc()
+    print("Running dummy forward pass...")
+    dummy_input = torch.randint(0, vocab_size, (2, 10), dtype=torch.long).to(device)
+    output = model(dummy_input)
+    print("Forward pass output:", output)
 
 if __name__ == "__main__":
     main()
