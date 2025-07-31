@@ -42,7 +42,7 @@ num_heads = 8
 d_ff = 2048
 num_layers = 6
 batch_size = 32  # Reduced for debugging
-epochs = 1  # Reduced for debugging
+epochs = 3  # Reduced for debugging
 lr = 3e-4
 
 def simple_train_fn(rank):
