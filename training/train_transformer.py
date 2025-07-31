@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 import wandb
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# Fix import path for models
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from models.transformer.transformer import TransformerModel
 from models.transformer.QA_transformer import QA_TransformerModel
