@@ -1,7 +1,7 @@
 # Core Deep Learning Libraries
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
+#torch==2.2.0
+#torchvision==0.17.2
+#torchaudio==2.2.2
 transformers>=4.30.0
 
 # Data Handling
@@ -40,7 +40,8 @@ diffusers>=0.19.3
 accelerate>=0.21.0
 
 # Multimodal / Hybrid Support
-clip-by-openai @ git+https://github.com/openai/CLIP.git
+#clip @ git+https://github.com/openai/CLIP.git
+
 
 # Jupyter & Dev Tools
 jupyterlab>=4.0.0
