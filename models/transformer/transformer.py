@@ -37,3 +37,4 @@ class TransformerModel(nn.Module):
             x = layer(x, mask)
         x = self.norm(x)
         return self.output_proj(x)
+

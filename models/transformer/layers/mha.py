@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import math
-import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 
 class MultiHeadAttention(nn.Module):
