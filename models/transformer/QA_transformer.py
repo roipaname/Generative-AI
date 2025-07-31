@@ -10,7 +10,8 @@ class QA_TransformerModel(nn.Module):
     
     def forward(self, input_ids, mask=None):
         # transformer output shape: (batch, seq_len, d_model)
-        hidden_states = self.transformer(input_ids, mask)  # (B, L, d_model)
+        hidden_states = self.transformer(input_ids, mask=mask, return_hidden=True)
+
         
         start_logits = self.start_classifier(hidden_states).squeeze(-1)  # (B, L)
         end_logits = self.end_classifier(hidden_states).squeeze(-1)      # (B, L)
