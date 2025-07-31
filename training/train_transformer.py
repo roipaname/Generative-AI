@@ -25,7 +25,8 @@ except Exception as e:
 # Test imports
 print("Testing model imports...")
 try:
-    sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
     from models.transformer.QA_transformer import QA_TransformerModel
     print("Model import successful")
 except Exception as e:
