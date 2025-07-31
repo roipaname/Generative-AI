@@ -132,5 +132,6 @@ def train_fn(rank, flags):
 
 if __name__ == "__main__":
     import torch_xla.distributed.xla_multiprocessing as xmp
-    xmp.spawn(train_fn, args=(), nprocs=8, start_method='fork')
+    xmp.spawn(train_fn, args=(), nprocs=None, start_method='fork')
+
 
