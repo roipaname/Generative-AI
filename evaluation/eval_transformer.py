@@ -24,17 +24,19 @@ num_layers = 6
 # Set up TPU
 device = xm.xla_device()
 
-# Initialize model and load checkpoint
+# Initialize model
 model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len)
+
+# Load checkpoint (on CPU, then move to TPU)
 checkpoint_path = os.path.join(os.path.dirname(__file__), '..', 'checkpoints', 'best_model.pt')
-model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
 model.to(device)
 model.eval()
 
 # Tokenizer
 tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
-# Sample question/context for testing
+# Sample input
 question = "What is the capital of France?"
 context = "France is a country in Europe. The capital of France is Paris, which is known for the Eiffel Tower."
 
@@ -47,17 +49,18 @@ encoding = tokenizer(
     return_tensors="pt"
 )
 
+# Move input to TPU
 input_ids = encoding['input_ids'].to(device)
 attention_mask = encoding['attention_mask'].to(device)
 
-# Run inference
+# Inference
 with torch.no_grad():
     start_logits, end_logits = model(input_ids, mask=attention_mask)
     start_idx = torch.argmax(start_logits, dim=1).item()
     end_idx = torch.argmax(end_logits, dim=1).item()
 
-# Decode the predicted answer
-tokens = input_ids[0][start_idx:end_idx + 1]
+# Decode answer
+tokens = input_ids[0][start_idx:end_idx + 1].cpu()
 answer = tokenizer.decode(tokens, skip_special_tokens=True)
 
 print(f"Q: {question}")
