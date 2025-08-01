@@ -1,3 +1,7 @@
+import torch_xla.core.xla_model as xm
+print("XLA devices available:", xm.get_xla_supported_devices())
+
+import torch_xla.distributed.xla_multiprocessing as xmp
 import os
 os.environ["XLA_USE_SPMD"] = "1"
 os.environ["PJRT_DEVICE"] = "TPU"
@@ -20,10 +24,7 @@ from datasets import load_dataset
 
 import torch_xla
 # test_tpu.py
-import torch_xla.core.xla_model as xm
-print("XLA devices available:", xm.get_xla_supported_devices())
 
-import torch_xla.distributed.xla_multiprocessing as xmp
 
 
 print("Testing TPU connectivity...")
