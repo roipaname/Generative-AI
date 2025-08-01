@@ -15,8 +15,10 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 from datasets import load_dataset
 
 import torch_xla
+# test_tpu.py
 import torch_xla.core.xla_model as xm
-print(xm.get_xla_supported_devices())
+print("XLA devices available:", xm.get_xla_supported_devices())
+
 import torch_xla.distributed.xla_multiprocessing as xmp
 
 
