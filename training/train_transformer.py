@@ -16,6 +16,7 @@ from datasets import load_dataset
 
 import torch_xla
 import torch_xla.core.xla_model as xm
+print(xm.get_xla_supported_devices())
 import torch_xla.distributed.xla_multiprocessing as xmp
 
 
