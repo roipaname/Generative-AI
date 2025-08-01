@@ -16,6 +16,7 @@ import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
 import torch_xla.distributed.parallel_loader as pl
+import torch_xla.runtime as xr
 
 # Critical: Environment setup BEFORE any torch_xla imports
 os.environ["XLA_USE_SPMD"] = "1"
@@ -111,8 +112,8 @@ def train_fn(index):
     try:
         # Initialize XLA device - this is critical
         device = xm.xla_device()
-        rank = xm.get_ordinal()
-        world_size = xm.xrt_world_size()
+        rank = xr.global_ordinal()
+        world_size = xr.world_size()
         
         print(f"[Rank {rank}/{world_size}] Initialized on device: {device}")
         
