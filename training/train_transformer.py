@@ -437,7 +437,7 @@ if __name__ == "__main__":
         start_time = datetime.now()
         print(f"Training started at: {start_time}")
         
-        xmp.spawn(full_train_fn, args=(), nprocs=3, start_method='fork')
+        xmp.spawn(full_train_fn, args=(), nprocs=8, start_method='fork')
         
         end_time = datetime.now()
         total_time = end_time - start_time
