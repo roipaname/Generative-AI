@@ -1,4 +1,6 @@
 import os
+os.environ["PJRT_DEVICE"] = "TPU"
+
 import signal
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
