@@ -1,6 +1,7 @@
 import os
 os.environ["XLA_USE_SPMD"] = "1"
-os.environ["PJRT_DEVICE"] = ""
+os.environ["PJRT_DEVICE"] = "TPU"
+
 
 import signal
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -456,7 +457,7 @@ if __name__ == "__main__":
         start_time = datetime.now()
         print(f"Training started at: {start_time}")
         
-        xmp.spawn(full_train_fn, args=(), nprocs=1, start_method='fork')
+        xmp.spawn(full_train_fn, args=(), nprocs=1, start_method='spawn')
         
         end_time = datetime.now()
         total_time = end_time - start_time
