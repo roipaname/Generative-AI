@@ -26,7 +26,7 @@ device = xm.xla_device()
 
 # Initialize model and load checkpoint
 model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len)
-checkpoint_path = os.path.join(os.path.dirname(__file__), '..', 'checkpoints', 'qa_transformer_checkpoint.pt')
+checkpoint_path = os.path.join(os.path.dirname(__file__), '..', 'checkpoints', 'qa_transformer_best.pt')
 model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 model.to(device)
 model.eval()
