@@ -1,4 +1,7 @@
 import os
+os.environ["XLA_USE_SPMD"] = "1"
+os.environ["PJRT_DEVICE"] = ""
+
 import signal
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -440,7 +443,8 @@ if __name__ == "__main__":
 
     print("\n=== Testing simple TPU functionality ===")
     try:
-        xmp.spawn(full_train_fn, args=(), nprocs=8, start_method='spawn')
+        import torch_xla.distributed.xla_multiprocessing as xmp
+        xmp.spawn(simple_train_fn, args=(), nprocs=8)
 
         print("Simple test passed!")
     except Exception as e:
