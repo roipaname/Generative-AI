@@ -88,47 +88,37 @@ class EnhancedQADataset(torch.utils.data.Dataset):
             'end_positions': torch.tensor(end_positions, dtype=torch.long)
         }
 
-def simple_train_fn(rank):
-    """Simple test function - consistent device initialization and return pattern"""
+def train_fn(rank):
+    """Combined training function with initial test and full training"""
     try:
-        # Use consistent device initialization
+        # Initialize device and check connectivity
         device = xm.xla_device()
-        print(f"Process {rank}: Initializing on device {device}")
+        world_size = xm.xrt_world_size()
         
-        model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
+        print(f"[Rank {rank}] Initialized on device: {device}")
+        print(f"[Rank {rank}] World size: {world_size}")
+        
+        # Quick connectivity test
+        print(f"[Rank {rank}] Running connectivity test...")
+        model_test = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
         test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
+        test_output = model_test(test_tensor)
+        print(f"[Rank {rank}] Connectivity test passed! Output shapes: {[x.shape for x in test_output]}")
+        del model_test, test_tensor, test_output  # Clean up test objects
         
-        # Forward pass test
-        output = model(test_tensor)
-        print(f"Process {rank}: Simple test passed on device {device}")
-        print(f"Process {rank}: Output shape: {[x.shape for x in output]}")
-        
-    except Exception as e:
-        print(f"Process {rank}: Simple test failed - {e}")
-        traceback.print_exc()
-    
-    # Ensure consistent return (None or no return)
-    return
-
-def full_train_fn(rank):
-    """Full training function with proper error handling and consistent patterns"""
-    try:
-        # Consistent device initialization
-        device = xm.xla_device()
-        print(f"[Rank {rank}] Starting training on device: {device}")
-        
-        # Initialize tokenizer and datasets
+        # Load datasets and tokenizer
+        print(f"[Rank {rank}] Loading datasets...")
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", add_prefix_space=True)
         train_data = load_dataset("squad", split=f"train[:{max_train_samples}]")
         eval_data = load_dataset("squad", split=f"validation[:{max_eval_samples}]")
 
         train_dataset = EnhancedQADataset(train_data, tokenizer, max_len)
         eval_dataset = EnhancedQADataset(eval_data, tokenizer, max_len)
-
-        # Distributed setup
-        world_size = xm.xrt_world_size()
-        print(f"[Rank {rank}] World size: {world_size}")
         
+        print(f"[Rank {rank}] Train dataset size: {len(train_dataset)}")
+        print(f"[Rank {rank}] Eval dataset size: {len(eval_dataset)}")
+
+        # Setup distributed training
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             train_dataset, num_replicas=world_size, rank=rank
         )
@@ -144,16 +134,17 @@ def full_train_fn(rank):
             batch_size=per_core_batch_size, 
             sampler=train_sampler, 
             drop_last=True,
-            num_workers=0  # Important for TPU
+            num_workers=0
         )
         eval_loader = DataLoader(
             eval_dataset, 
             batch_size=per_core_batch_size, 
             sampler=eval_sampler,
-            num_workers=0  # Important for TPU
+            num_workers=0
         )
 
-        # Model setup
+        # Initialize model and training components
+        print(f"[Rank {rank}] Initializing model...")
         model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, len(train_loader)*epochs)
@@ -201,7 +192,7 @@ def full_train_fn(rank):
                     continue
             
             if xm.is_master_ordinal():
-                avg_epoch_loss = epoch_loss / len(train_loader)
+                avg_epoch_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else 0
                 print(f"[Rank {rank}] Completed epoch {epoch + 1}/{epochs} - Avg Loss: {avg_epoch_loss:.4f}")
 
         if xm.is_master_ordinal():
@@ -210,37 +201,16 @@ def full_train_fn(rank):
     except Exception as e:
         print(f"[Rank {rank}] Training failed with exception: {e}")
         traceback.print_exc()
-        # Don't kill the process, let XLA handle cleanup
-    
-    # Ensure consistent return
-    return
 
 if __name__ == "__main__":
-    print("=== Checking TPU availability ===")
-    try:
-        # Check if TPUs are available
-        print(f"TPU devices: {torch_xla._XLAC._xla_get_devices()}")
-        print(f"XRT world size: {xm.xrt_world_size()}")
-    except Exception as e:
-        print(f"TPU check failed: {e}")
-        sys.exit(1)
+    print("=== Starting TPU Training ===")
+    print("Note: TPU availability will be checked inside the spawned processes")
     
-    print("\n=== Testing TPU connectivity and functionality ===")
-    try:
-        # Use nprocs=None to let XLA determine the number of processes
-        xmp.spawn(simple_train_fn, args=(), nprocs=None, start_method='fork')
-        print("Simple test completed successfully!")
-    except Exception as e:
-        print(f"Simple test failed: {e}")
-        traceback.print_exc()
-        sys.exit(1)
-
-    print("\n=== Starting full TPU training ===")
     start_time = datetime.now()
     try:
-        xmp.spawn(full_train_fn, args=(), nprocs=None, start_method='fork')
+        xmp.spawn(train_fn, args=(), nprocs=None, start_method='fork')
         print(f"Training completed successfully in {datetime.now() - start_time}")
     except Exception as e:
-        print(f"Full training failed: {e}")
+        print(f"Training failed: {e}")
         traceback.print_exc()
         sys.exit(1)
