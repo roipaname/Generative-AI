@@ -22,7 +22,6 @@ import torch_xla.runtime as xr
 os.environ["XLA_USE_SPMD"] = "1"
 os.environ["PJRT_DEVICE"] = "TPU"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-# Add these critical environment variables
 os.environ["XLA_PERSISTENT_CACHE_DEVICE"] = "1"
 os.environ["XLA_CACHE_SIZE"] = "128MB"
 
@@ -96,10 +95,6 @@ class EnhancedQADataset(torch.utils.data.Dataset):
 def cleanup_resources():
     """Clean up TPU and multiprocessing resources"""
     try:
-        # Force cleanup of XLA resources
-        if hasattr(torch_xla, '_XLAC'):
-            torch_xla._XLAC._clear_all_traces()
-        
         # Clear CUDA cache if available
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -112,8 +107,8 @@ def train_fn(index):
     try:
         # Initialize XLA device - this is critical
         device = xm.xla_device()
-        rank = xr.global_ordinal()
-        world_size = xr.world_size()
+        rank = xm.get_ordinal()
+        world_size = xm.xrt_world_size()
         
         print(f"[Rank {rank}/{world_size}] Initialized on device: {device}")
         
@@ -131,9 +126,8 @@ def train_fn(index):
         
         # Clean up test objects immediately
         del model_test, test_tensor, test_output
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
-        # Load datasets and tokenizer (only on rank 0 initially)
+        # Load datasets and tokenizer
         if rank == 0:
             print("Loading datasets...")
             
@@ -249,27 +243,33 @@ def train_fn(index):
                     continue
             
             # Synchronize all processes before epoch summary
-            xm.rendezvous('epoch_end')
+            xm.rendezvous(f'epoch_end_{epoch}')
             
             # Calculate and report epoch statistics
             if step_count > 0:
                 avg_epoch_loss = epoch_loss / step_count
                 
                 if rank == 0:
-                    print(f"Epoch {epoch + 1} completed | Avg Loss: {avg_epoch_loss:.4f}")
+                    print(f"Epoch {epoch + 1} completed | Steps: {step_count} | Avg Loss: {avg_epoch_loss:.4f}")
                     
                     # Save best model
                     if avg_epoch_loss < best_loss:
                         best_loss = avg_epoch_loss
                         # Only rank 0 saves the model
                         xm.save(model.state_dict(), "checkpoints/best_model.pt")
-                        print("New best model saved: checkpoints/best_model.pt")
+                        print(f"New best model saved: checkpoints/best_model.pt (Loss: {avg_epoch_loss:.4f})")
                     
                     # Periodic checkpoint
                     if (epoch + 1) % save_every_n_epochs == 0:
                         ckpt_path = f"checkpoints/model_epoch{epoch + 1}.pt"
                         xm.save(model.state_dict(), ckpt_path)
                         print(f"Checkpoint saved: {ckpt_path}")
+                        
+                    # Force print buffer flush
+                    sys.stdout.flush()
+            else:
+                if rank == 0:
+                    print(f"WARNING: Epoch {epoch + 1} had no training steps!")
 
         # Save final model
         if rank == 0:
@@ -308,8 +308,8 @@ if __name__ == "__main__":
     start_time = datetime.now()
     
     try:
-        # Use spawn with nprocs=8 for TPU v2-8
-        xmp.spawn(train_fn, nprocs=1, start_method='fork')  # Use 'fork' for TPU v2-8
+        # CRITICAL FIX: Use nprocs=8 for TPU v2-8, not nprocs=1
+        xmp.spawn(train_fn, nprocs=8, start_method='fork')
 
         print(f"\nTraining completed successfully in {datetime.now() - start_time}")
         print("Utilized all 8 TPU v2-8 cores")
