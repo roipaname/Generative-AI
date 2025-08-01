@@ -88,10 +88,68 @@ class EnhancedQADataset(torch.utils.data.Dataset):
             'end_positions': torch.tensor(end_positions, dtype=torch.long)
         }
 
-def get_tpu_cores():
-    """Get TPU cores - TPU v2-8 has 8 cores"""
-    # TPU v2-8 always has 8 cores
-    return 8
+def get_available_tpu_cores():
+    """Dynamically detect available TPU cores"""
+    try:
+        import torch_xla.core.xla_model as xm
+        
+        # Try to get XLA device and world size
+        try:
+            device = xm.xla_device()
+            world_size = xm.xrt_world_size()
+            supported_devices = xm.get_xla_supported_devices()
+            
+            print(f"XLA supported devices: {supported_devices}")
+            print(f"Current XLA device: {device}")
+            print(f"XLA world size: {world_size}")
+            
+            # Count TPU devices
+            tpu_devices = [d for d in supported_devices if 'TPU' in d]
+            tpu_cores = len(tpu_devices)
+            
+            if tpu_cores > 0:
+                print(f"Detected {tpu_cores} TPU cores: {tpu_devices}")
+                return tpu_cores
+            else:
+                print("No TPU devices found, checking environment variables...")
+                
+        except Exception as xla_e:
+            print(f"XLA detection failed: {xla_e}")
+        
+        # Fallback: Check environment variables
+        if "TPU_NUM_DEVICES" in os.environ:
+            cores = int(os.environ["TPU_NUM_DEVICES"])
+            print(f"Using TPU_NUM_DEVICES environment variable: {cores}")
+            return cores
+            
+        # Fallback: Try to detect from TPU name/type
+        try:
+            # Check if we can get TPU info from gcloud (if available)
+            import subprocess
+            result = subprocess.run(['gcloud', 'compute', 'tpus', 'tpu-vm', 'list', '--format=json'], 
+                                  capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                import json
+                tpus = json.loads(result.stdout)
+                if tpus:
+                    # Extract accelerator type (e.g., "v2-8" -> 8 cores)
+                    accel_type = tpus[0].get('acceleratorType', '')
+                    if 'v2-8' in accel_type or 'v3-8' in accel_type or 'v4-8' in accel_type:
+                        print(f"Detected TPU type: {accel_type} -> 8 cores")
+                        return 8
+                    elif 'v5p-8' in accel_type:
+                        print(f"Detected TPU type: {accel_type} -> 8 cores")
+                        return 8
+        except Exception as gcloud_e:
+            print(f"gcloud detection failed: {gcloud_e}")
+        
+        # Default fallback
+        print("Could not detect TPU cores, defaulting to 8 (typical for v2-8, v3-8, v4-8)")
+        return 8
+        
+    except ImportError:
+        print("torch_xla not available, defaulting to 8 cores")
+        return 8
 
 def train_fn(rank):
     """Combined training function with initial test and full training"""
@@ -254,17 +312,18 @@ def train_fn(rank):
         traceback.print_exc()
 
 if __name__ == "__main__":
-    print("=== TPU v2-8 Training Configuration ===")
+    print("=== TPU Training Configuration ===")
     
-    # TPU v2-8 has 8 cores
-    tpu_cores = get_tpu_cores()
+    # Dynamically detect available TPU cores
+    tpu_cores = get_available_tpu_cores()
     per_core_batch = batch_size // tpu_cores
     
-    print(f"TPU Type: v2-8")
-    print(f"TPU Cores: {tpu_cores}")
+    print(f"Detected TPU Cores: {tpu_cores}")
     print(f"Global batch size: {batch_size}")
     print(f"Per-core batch size: {per_core_batch}")
     print(f"Effective global batch: {per_core_batch * tpu_cores}")
+    print(f"Learning rate: {lr}")
+    print(f"Epochs: {epochs}")
     
     if per_core_batch < 1:
         print("WARNING: Per-core batch size < 1. Increasing global batch size...")
@@ -272,13 +331,30 @@ if __name__ == "__main__":
         per_core_batch = 1
         print(f"Adjusted global batch size: {batch_size}")
     
-    print(f"\n=== Starting TPU v2-8 Training ===")
+    print(f"\n=== Starting TPU Training ===")
     start_time = datetime.now()
     try:
-        # Use all 8 cores of TPU v2-8
-        xmp.spawn(train_fn, args=(), nprocs=tpu_cores, start_method='fork')
+        # First try with auto-detection (recommended)
+        print("Attempting training with auto-detection (nprocs=None)...")
+        xmp.spawn(train_fn, args=(), nprocs=None, start_method='fork')
         print(f"\nTraining completed successfully in {datetime.now() - start_time}")
-        print(f"Utilized all {tpu_cores} TPU v2-8 cores")
+        print(f"Utilized detected TPU cores")
+        
+    except ValueError as ve:
+        if "Unsupported nprocs" in str(ve):
+            print(f"Auto-detection failed, trying with nprocs=1...")
+            try:
+                xmp.spawn(train_fn, args=(), nprocs=1, start_method='fork')
+                print(f"\nTraining completed successfully in {datetime.now() - start_time}")
+            except Exception as e2:
+                print(f"Training with nprocs=1 also failed: {e2}")
+                traceback.print_exc()
+                sys.exit(1)
+        else:
+            print(f"Training failed with different error: {ve}")
+            traceback.print_exc()
+            sys.exit(1)
+            
     except Exception as e:
         print(f"Training failed: {e}")
         traceback.print_exc()
