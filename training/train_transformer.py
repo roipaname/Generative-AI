@@ -27,7 +27,6 @@ except Exception as e:
 print("Testing model imports...")
 try:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
     from models.transformer.QA_transformer import QA_TransformerModel
     print("Model import successful")
 except Exception as e:
@@ -62,7 +61,6 @@ def simple_train_fn(rank):
         print(f"Process {rank}: Testing tensor operations...")
         test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
         output = model(test_tensor)
-
 
         print(f"Process {rank}: Tensor operations successful")
         
@@ -171,6 +169,19 @@ def full_train_fn(rank):
                     print(f"Process {rank} Epoch {epoch+1} Step {i} Loss: {loss.item():.4f}")
             
             xm.mark_step()
+
+            # Save checkpoint only on master process (rank 0)
+            if xm.is_master_ordinal():
+                checkpoint_dir = os.path.join(os.path.dirname(__file__), '..', 'checkpoints')
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                checkpoint_path = os.path.join(checkpoint_dir, f'model_tranformer_epoch_{epoch+1}.pt')
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': loss.item(),
+                }, checkpoint_path)
+                print(f"[Rank {rank}] Saved checkpoint to {checkpoint_path}")
         
         if xm.is_master_ordinal():
             print("Training completed successfully!")
