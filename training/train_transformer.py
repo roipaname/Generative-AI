@@ -231,6 +231,11 @@ def full_train_fn(rank):
             drop_last=False,
             num_workers=0
         )
+        from torch_xla.distributed.parallel_loader import MpDeviceLoader
+
+        train_device_loader = MpDeviceLoader(train_loader, device)
+        eval_device_loader = MpDeviceLoader(eval_loader, device)
+
 
         print(f"Process {rank}: Dataset loaded - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
 
@@ -277,7 +282,7 @@ def full_train_fn(rank):
 
             print(f"Process {rank}: Starting epoch {epoch+1}/{epochs}")
 
-            for step, batch in enumerate(train_loader):
+            for step, batch in enumerate(train_device_loader):
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 start_positions = batch['start_positions'].to(device)
@@ -309,7 +314,7 @@ def full_train_fn(rank):
 
                 # Periodic evaluation
                 if global_step % (eval_every_n_steps * 2) == 0:
-                    eval_loss = evaluate_model(model, eval_loader, criterion, device, rank)
+                    eval_loss = evaluate_model(model, eval_device_loader, criterion, device, rank)
                     if xm.is_master_ordinal():
                         print(f"Process {rank} Step {global_step} - Eval Loss: {eval_loss:.4f}")
                     
