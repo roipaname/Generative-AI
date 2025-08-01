@@ -89,21 +89,35 @@ class EnhancedQADataset(torch.utils.data.Dataset):
         }
 
 def simple_train_fn(rank):
+    """Simple test function - consistent device initialization and return pattern"""
     try:
-        device = xm.xla_device(n=rank)
+        # Use consistent device initialization
+        device = xm.xla_device()
+        print(f"Process {rank}: Initializing on device {device}")
+        
         model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
         test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
-        model(test_tensor)
-        print(f"Process {rank}: simple test passed on device {device}")
+        
+        # Forward pass test
+        output = model(test_tensor)
+        print(f"Process {rank}: Simple test passed on device {device}")
+        print(f"Process {rank}: Output shape: {[x.shape for x in output]}")
         
     except Exception as e:
-        print(f"Process {rank}: simple test failed - {e}")
+        print(f"Process {rank}: Simple test failed - {e}")
         traceback.print_exc()
-    return None
+    
+    # Ensure consistent return (None or no return)
+    return
 
 def full_train_fn(rank):
+    """Full training function with proper error handling and consistent patterns"""
     try:
+        # Consistent device initialization
         device = xm.xla_device()
+        print(f"[Rank {rank}] Starting training on device: {device}")
+        
+        # Initialize tokenizer and datasets
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", add_prefix_space=True)
         train_data = load_dataset("squad", split=f"train[:{max_train_samples}]")
         eval_data = load_dataset("squad", split=f"validation[:{max_eval_samples}]")
@@ -111,57 +125,122 @@ def full_train_fn(rank):
         train_dataset = EnhancedQADataset(train_data, tokenizer, max_len)
         eval_dataset = EnhancedQADataset(eval_data, tokenizer, max_len)
 
+        # Distributed setup
         world_size = xm.xrt_world_size()
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-        eval_sampler = torch.utils.data.distributed.DistributedSampler(eval_dataset, num_replicas=world_size, rank=rank)
+        print(f"[Rank {rank}] World size: {world_size}")
+        
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset, num_replicas=world_size, rank=rank
+        )
+        eval_sampler = torch.utils.data.distributed.DistributedSampler(
+            eval_dataset, num_replicas=world_size, rank=rank
+        )
 
         per_core_batch_size = max(1, batch_size // world_size)
-        train_loader = DataLoader(train_dataset, batch_size=per_core_batch_size, sampler=train_sampler, drop_last=True)
-        eval_loader = DataLoader(eval_dataset, batch_size=per_core_batch_size, sampler=eval_sampler)
+        print(f"[Rank {rank}] Per-core batch size: {per_core_batch_size}")
+        
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=per_core_batch_size, 
+            sampler=train_sampler, 
+            drop_last=True,
+            num_workers=0  # Important for TPU
+        )
+        eval_loader = DataLoader(
+            eval_dataset, 
+            batch_size=per_core_batch_size, 
+            sampler=eval_sampler,
+            num_workers=0  # Important for TPU
+        )
 
+        # Model setup
         model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, len(train_loader)*epochs)
         criterion = nn.CrossEntropyLoss()
 
+        print(f"[Rank {rank}] Starting training loop...")
+        
         global_step = 0
         for epoch in range(epochs):
             model.train()
             train_sampler.set_epoch(epoch)
-            for batch in train_loader:
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                start_positions = batch['start_positions'].to(device)
-                end_positions = batch['end_positions'].to(device)
+            epoch_loss = 0.0
+            
+            if xm.is_master_ordinal():
+                print(f"[Rank {rank}] Starting epoch {epoch + 1}/{epochs}")
+            
+            for batch_idx, batch in enumerate(train_loader):
+                try:
+                    input_ids = batch['input_ids'].to(device)
+                    attention_mask = batch['attention_mask'].to(device)
+                    start_positions = batch['start_positions'].to(device)
+                    end_positions = batch['end_positions'].to(device)
 
-                optimizer.zero_grad()
-                start_logits, end_logits = model(input_ids, mask=attention_mask)
-                loss = (criterion(start_logits, start_positions) + criterion(end_logits, end_positions)) / 2
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                xm.optimizer_step(optimizer)
-                scheduler.step()
-                global_step += 1
+                    optimizer.zero_grad()
+                    start_logits, end_logits = model(input_ids, mask=attention_mask)
+                    
+                    start_loss = criterion(start_logits, start_positions)
+                    end_loss = criterion(end_logits, end_positions)
+                    loss = (start_loss + end_loss) / 2
+                    
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    xm.optimizer_step(optimizer)
+                    scheduler.step()
+                    
+                    epoch_loss += loss.item()
+                    global_step += 1
 
-                if global_step % eval_every_n_steps == 0 and xm.is_master_ordinal():
-                    print(f"[Rank {rank}] Step {global_step} - Loss: {loss.item():.4f}")
+                    if global_step % eval_every_n_steps == 0 and xm.is_master_ordinal():
+                        avg_loss = epoch_loss / (batch_idx + 1)
+                        print(f"[Rank {rank}] Epoch {epoch+1}, Step {global_step} - Loss: {loss.item():.4f}, Avg Loss: {avg_loss:.4f}")
+                
+                except Exception as batch_e:
+                    print(f"[Rank {rank}] Error in batch {batch_idx}: {batch_e}")
+                    continue
+            
+            if xm.is_master_ordinal():
+                avg_epoch_loss = epoch_loss / len(train_loader)
+                print(f"[Rank {rank}] Completed epoch {epoch + 1}/{epochs} - Avg Loss: {avg_epoch_loss:.4f}")
 
         if xm.is_master_ordinal():
-            print("Training complete.")
+            print(f"[Rank {rank}] Training completed successfully!")
 
     except Exception as e:
-        print(f"[Rank {rank}] Exception: {e}")
+        print(f"[Rank {rank}] Training failed with exception: {e}")
         traceback.print_exc()
-        os.kill(os.getpid(), signal.SIGTERM)
+        # Don't kill the process, let XLA handle cleanup
+    
+    # Ensure consistent return
+    return
 
 if __name__ == "__main__":
+    print("=== Checking TPU availability ===")
+    try:
+        # Check if TPUs are available
+        print(f"TPU devices: {torch_xla._XLAC._xla_get_devices()}")
+        print(f"XRT world size: {xm.xrt_world_size()}")
+    except Exception as e:
+        print(f"TPU check failed: {e}")
+        sys.exit(1)
+    
     print("\n=== Testing TPU connectivity and functionality ===")
-    xmp.spawn(simple_train_fn, args=(), start_method='fork')
-
-
-
+    try:
+        # Use nprocs=None to let XLA determine the number of processes
+        xmp.spawn(simple_train_fn, args=(), nprocs=None, start_method='fork')
+        print("Simple test completed successfully!")
+    except Exception as e:
+        print(f"Simple test failed: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 
     print("\n=== Starting full TPU training ===")
     start_time = datetime.now()
-    xmp.spawn(full_train_fn, args=(),  start_method='fork')
-    print(f"Training completed in {datetime.now() - start_time}")
+    try:
+        xmp.spawn(full_train_fn, args=(), nprocs=None, start_method='fork')
+        print(f"Training completed successfully in {datetime.now() - start_time}")
+    except Exception as e:
+        print(f"Full training failed: {e}")
+        traceback.print_exc()
+        sys.exit(1)
