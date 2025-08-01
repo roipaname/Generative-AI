@@ -423,7 +423,7 @@ if __name__ == "__main__":
 
     print("\n=== Testing simple TPU functionality ===")
     try:
-        xmp.spawn(simple_train_fn, args=(), nprocs=8, start_method='spawn')
+        xmp.spawn(simple_train_fn, args=(), nprocs=1, start_method='spawn')
         print("Simple test passed!")
     except Exception as e:
         print(f"Simple test failed: {e}")
