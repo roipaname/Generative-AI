@@ -276,7 +276,7 @@ if __name__ == "__main__":
     start_time = datetime.now()
     try:
         # Use all 8 cores of TPU v2-8
-        xmp.spawn(train_fn, args=(), nprocs=None, start_method='fork')
+        xmp.spawn(train_fn, args=())
         print(f"\nTraining completed successfully in {datetime.now() - start_time}")
         print(f"Utilized all {tpu_cores} TPU v2-8 cores")
     except Exception as e:
