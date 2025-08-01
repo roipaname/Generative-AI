@@ -188,8 +188,8 @@ def full_train_fn(rank):
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", add_prefix_space=True)
 
         # Load larger dataset for better training
-        train_dataset_raw = load_dataset("squad", split="train[:1000]")  # Increased dataset size
-        eval_dataset_raw = load_dataset("squad", split="validation[:100]")
+        train_dataset_raw = load_dataset("squad", split="train[:5000]")  # Increased dataset size
+        eval_dataset_raw = load_dataset("squad", split="validation[:5000]")
 
         train_dataset = EnhancedQADataset(train_dataset_raw, tokenizer, max_len)
         eval_dataset = EnhancedQADataset(eval_dataset_raw, tokenizer, max_len)
