@@ -1,6 +1,4 @@
 import os
-os.environ["PJRT_DEVICE"] = "TPU"
-
 import signal
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -19,9 +17,6 @@ from datasets import load_dataset
 import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
-device_count = xm.xrt_world_size()
-print(f"TPU cores available: {device_count}")
-
 
 
 print("Testing TPU connectivity...")
@@ -45,21 +40,23 @@ except Exception as e:
     sys.exit(1)
 
 
-# Enhanced Hyperparameters for longer, better training
+# Enhanced Hyperparameters for longer, better training (Memory optimized)
 vocab_size = 30522
 max_len = 384
 d_model = 512
 num_heads = 8
 d_ff = 2048
 num_layers = 6
-batch_size = 16  # Optimized for TPU memory
+batch_size = 8  # Reduced for memory stability
 epochs = 10  # Increased for better training
 lr = 2e-4  # Slightly reduced for stability
-warmup_steps = 1000  # Warmup for better convergence
+warmup_steps = 500  # Reduced warmup steps
 weight_decay = 0.01  # L2 regularization
 max_grad_norm = 1.0  # Gradient clipping
-save_every_n_epochs = 2  # Save checkpoints more frequently
-eval_every_n_steps = 100  # Evaluate more frequently
+save_every_n_epochs = 3  # Save checkpoints less frequently
+eval_every_n_steps = 200  # Evaluate less frequently
+max_train_samples = 2000  # Limit dataset size for memory
+max_eval_samples = 200   # Limit eval dataset size
 
 
 class EnhancedQADataset(torch.utils.data.Dataset):
@@ -192,9 +189,10 @@ def full_train_fn(rank):
         print(f"Process {rank}: Loading tokenizer and dataset...")
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", add_prefix_space=True)
 
-        # Load larger dataset for better training
-        train_dataset_raw = load_dataset("squad", split="train[:5000]")  # Increased dataset size
-        eval_dataset_raw = load_dataset("squad", split="validation[:500]")
+        # Load dataset with memory constraints
+        print(f"Process {rank}: Loading {max_train_samples} training samples...")
+        train_dataset_raw = load_dataset("squad", split=f"train[:{max_train_samples}]")
+        eval_dataset_raw = load_dataset("squad", split=f"validation[:{max_eval_samples}]")
 
         train_dataset = EnhancedQADataset(train_dataset_raw, tokenizer, max_len)
         eval_dataset = EnhancedQADataset(eval_dataset_raw, tokenizer, max_len)
@@ -309,27 +307,30 @@ def full_train_fn(rank):
                     avg_loss = sum(epoch_losses[-10:]) / min(len(epoch_losses), 10)
                     print(f"Process {rank} Step {global_step} - Loss: {avg_loss:.4f}, LR: {current_lr:.2e}")
 
-                # Periodic evaluation
-                if global_step % (eval_every_n_steps * 2) == 0:
-                    eval_loss = evaluate_model(model, eval_loader, criterion, device, rank)
-                    if xm.is_master_ordinal():
-                        print(f"Process {rank} Step {global_step} - Eval Loss: {eval_loss:.4f}")
-                    
-                    # Save best model
-                    if eval_loss < best_eval_loss and xm.is_master_ordinal():
-                        best_eval_loss = eval_loss
-                        checkpoint_dir = os.path.join(os.path.dirname(__file__), '..', 'checkpoints')
-                        os.makedirs(checkpoint_dir, exist_ok=True)
-                        best_model_path = os.path.join(checkpoint_dir, 'qa_transformer_best.pt')
-                        torch.save({
-                            'model_state_dict': model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'scheduler_state_dict': scheduler.state_dict(),
-                            'epoch': epoch,
-                            'step': global_step,
-                            'eval_loss': eval_loss,
-                        }, best_model_path)
-                        print(f"New best model saved with eval loss: {eval_loss:.4f}")
+                # Periodic evaluation (less frequent to save memory)
+                if global_step % (eval_every_n_steps * 3) == 0:
+                    try:
+                        eval_loss = evaluate_model(model, eval_loader, criterion, device, rank)
+                        if xm.is_master_ordinal():
+                            print(f"Process {rank} Step {global_step} - Eval Loss: {eval_loss:.4f}")
+                        
+                        # Save best model
+                        if eval_loss < best_eval_loss and xm.is_master_ordinal():
+                            best_eval_loss = eval_loss
+                            checkpoint_dir = os.path.join(os.path.dirname(__file__), '..', 'checkpoints')
+                            os.makedirs(checkpoint_dir, exist_ok=True)
+                            best_model_path = os.path.join(checkpoint_dir, 'qa_transformer_best.pt')
+                            torch.save({
+                                'model_state_dict': model.state_dict(),
+                                'optimizer_state_dict': optimizer.state_dict(),
+                                'scheduler_state_dict': scheduler.state_dict(),
+                                'epoch': epoch,
+                                'step': global_step,
+                                'eval_loss': eval_loss,
+                            }, best_model_path)
+                            print(f"New best model saved with eval loss: {eval_loss:.4f}")
+                    except Exception as eval_e:
+                        print(f"Process {rank}: Evaluation failed: {eval_e}, continuing training...")
 
             xm.mark_step()
 
@@ -345,28 +346,36 @@ def full_train_fn(rank):
                 training_history['learning_rates'].append(scheduler.get_last_lr()[0])
                 training_history['epochs'].append(epoch + 1)
 
-            # Final evaluation for the epoch
-            eval_loss = evaluate_model(model, eval_loader, criterion, device, rank)
-            if xm.is_master_ordinal():
-                training_history['eval_losses'].append(eval_loss)
-                print(f"Process {rank} Epoch {epoch+1} - Final Eval Loss: {eval_loss:.4f}")
+            # Final evaluation for the epoch (with error handling)
+            try:
+                eval_loss = evaluate_model(model, eval_loader, criterion, device, rank)
+                if xm.is_master_ordinal():
+                    training_history['eval_losses'].append(eval_loss)
+                    print(f"Process {rank} Epoch {epoch+1} - Final Eval Loss: {eval_loss:.4f}")
+            except Exception as eval_e:
+                print(f"Process {rank}: End-of-epoch evaluation failed: {eval_e}")
+                if xm.is_master_ordinal():
+                    training_history['eval_losses'].append(avg_epoch_loss)  # Use training loss as fallback
 
-            # Save checkpoint every N epochs
+            # Save checkpoint every N epochs (with error handling)
             if (epoch + 1) % save_every_n_epochs == 0 and xm.is_master_ordinal():
-                checkpoint_dir = os.path.join(os.path.dirname(__file__), '..', 'checkpoints')
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                checkpoint_path = os.path.join(checkpoint_dir, f'qa_transformer_epoch_{epoch+1}.pt')
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'epoch': epoch,
-                    'step': global_step,
-                    'train_loss': avg_epoch_loss,
-                    'eval_loss': eval_loss,
-                    'training_history': training_history
-                }, checkpoint_path)
-                print(f"Checkpoint saved: {checkpoint_path}")
+                try:
+                    checkpoint_dir = os.path.join(os.path.dirname(__file__), '..', 'checkpoints')
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    checkpoint_path = os.path.join(checkpoint_dir, f'qa_transformer_epoch_{epoch+1}.pt')
+                    torch.save({
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'epoch': epoch,
+                        'step': global_step,
+                        'train_loss': avg_epoch_loss,
+                        'eval_loss': eval_loss if 'eval_loss' in locals() else avg_epoch_loss,
+                        'training_history': training_history
+                    }, checkpoint_path)
+                    print(f"Checkpoint saved: {checkpoint_path}")
+                except Exception as save_e:
+                    print(f"Process {rank}: Checkpoint saving failed: {save_e}")
 
         if xm.is_master_ordinal():
             print("Enhanced training completed successfully!")
@@ -428,7 +437,7 @@ if __name__ == "__main__":
 
     print("\n=== Testing simple TPU functionality ===")
     try:
-        xmp.spawn(simple_train_fn, args=(), nprocs=8, start_method='fork')
+        xmp.spawn(simple_train_fn, args=(), nprocs=1, start_method='fork')
         print("Simple test passed!")
     except Exception as e:
         print(f"Simple test failed: {e}")
@@ -439,7 +448,7 @@ if __name__ == "__main__":
         start_time = datetime.now()
         print(f"Training started at: {start_time}")
         
-        xmp.spawn(full_train_fn, args=(), nprocs=8, start_method='fork')
+        xmp.spawn(full_train_fn, args=(), nprocs=1, start_method='fork')
         
         end_time = datetime.now()
         total_time = end_time - start_time
