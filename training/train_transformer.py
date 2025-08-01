@@ -106,7 +106,7 @@ def cleanup_resources():
     except Exception as e:
         print(f"Warning: Error during cleanup: {e}")
 
-def train_fn():
+def train_fn(index):
     """Fixed training function with proper TPU handling"""
     try:
         # Initialize XLA device - this is critical
