@@ -90,7 +90,7 @@ class EnhancedQADataset(torch.utils.data.Dataset):
 
 def simple_train_fn(rank):
     try:
-        device = xm.xla_device()
+        device = xm.xla_device(n=rank)
         model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
         test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
         model(test_tensor)
@@ -156,7 +156,8 @@ def full_train_fn(rank):
 
 if __name__ == "__main__":
     print("\n=== Testing TPU connectivity and functionality ===")
-    xmp.spawn(simple_train_fn, args=(), start_method='fork')
+    xmp.spawn(simple_train_fn, args=(), nprocs=4, start_method='fork')
+
 
 
 
