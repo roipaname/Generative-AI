@@ -426,7 +426,7 @@ if __name__ == "__main__":
 
     print("\n=== Testing simple TPU functionality ===")
     try:
-        xmp.spawn(simple_train_fn, args=(), nprocs=1, start_method='spawn')
+        xmp.spawn(simple_train_fn, args=(), nprocs=1, start_method='fork')
         print("Simple test passed!")
     except Exception as e:
         print(f"Simple test failed: {e}")
@@ -437,7 +437,7 @@ if __name__ == "__main__":
         start_time = datetime.now()
         print(f"Training started at: {start_time}")
         
-        xmp.spawn(full_train_fn, args=(), nprocs=3, start_method='spawn')
+        xmp.spawn(full_train_fn, args=(), nprocs=3, start_method='fork')
         
         end_time = datetime.now()
         total_time = end_time - start_time
