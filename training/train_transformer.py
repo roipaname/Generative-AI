@@ -309,7 +309,7 @@ if __name__ == "__main__":
     
     try:
         # CRITICAL FIX: Use nprocs=8 for TPU v2-8, not nprocs=1
-        xmp.spawn(train_fn, nprocs=8, start_method='fork')
+        xmp.spawn(train_fn, nprocs=None, start_method='fork')
 
         print(f"\nTraining completed successfully in {datetime.now() - start_time}")
         print("Utilized all 8 TPU v2-8 cores")
