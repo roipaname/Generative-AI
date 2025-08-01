@@ -15,11 +15,15 @@ from datasets import load_dataset
 import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
+import torch_xla.distributed.parallel_loader as pl
 
-# Environment setup (must be before torch_xla.device())
+# Critical: Environment setup BEFORE any torch_xla imports
 os.environ["XLA_USE_SPMD"] = "1"
 os.environ["PJRT_DEVICE"] = "TPU"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# Add these critical environment variables
+os.environ["XLA_PERSISTENT_CACHE_DEVICE"] = "1"
+os.environ["XLA_CACHE_SIZE"] = "128MB"
 
 # Import model after appending project path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -32,14 +36,14 @@ d_model = 512
 num_heads = 8
 d_ff = 2048
 num_layers = 6
-batch_size = 64  # Optimized for 8 TPU cores (8 per core)
+batch_size = 64  # Global batch size
 epochs = 10
 lr = 2e-4
 warmup_steps = 500
 weight_decay = 0.01
 max_grad_norm = 1.0
 save_every_n_epochs = 3
-eval_every_n_steps = 100  # More frequent logging for 8 cores
+eval_every_n_steps = 100
 max_train_samples = 2000
 max_eval_samples = 200
 
@@ -88,23 +92,34 @@ class EnhancedQADataset(torch.utils.data.Dataset):
             'end_positions': torch.tensor(end_positions, dtype=torch.long)
         }
 
-def get_tpu_cores():
-    """Get TPU cores - TPU v2-8 has 8 cores"""
-    # TPU v2-8 always has 8 cores
-    return 8
-
-def train_fn(rank):
-    """Combined training function with initial test and full training"""
+def cleanup_resources():
+    """Clean up TPU and multiprocessing resources"""
     try:
-        # Initialize device and check connectivity
+        # Force cleanup of XLA resources
+        if hasattr(torch_xla, '_XLAC'):
+            torch_xla._XLAC._clear_all_traces()
+        
+        # Clear CUDA cache if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+    except Exception as e:
+        print(f"Warning: Error during cleanup: {e}")
+
+def train_fn():
+    """Fixed training function with proper TPU handling"""
+    try:
+        # Initialize XLA device - this is critical
         device = xm.xla_device()
+        rank = xm.get_ordinal()
         world_size = xm.xrt_world_size()
         
         print(f"[Rank {rank}/{world_size}] Initialized on device: {device}")
         
-        if rank == 0:  # Only master prints general info
+        if rank == 0:
             print(f"Total TPU cores being used: {world_size}")
-            print(f"Effective global batch size: {batch_size}")
+            print(f"Global batch size: {batch_size}")
+            print(f"Per-core batch size: {batch_size // world_size}")
         
         # Quick connectivity test
         print(f"[Rank {rank}] Running connectivity test...")
@@ -112,11 +127,15 @@ def train_fn(rank):
         test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
         test_output = model_test(test_tensor)
         print(f"[Rank {rank}] Connectivity test passed! Output shapes: {[x.shape for x in test_output]}")
-        del model_test, test_tensor, test_output  # Clean up test objects
         
-        # Load datasets and tokenizer
+        # Clean up test objects immediately
+        del model_test, test_tensor, test_output
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
+        # Load datasets and tokenizer (only on rank 0 initially)
         if rank == 0:
-            print(f"Loading datasets...")
+            print("Loading datasets...")
+            
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", add_prefix_space=True)
         train_data = load_dataset("squad", split=f"train[:{max_train_samples}]")
         eval_data = load_dataset("squad", split=f"validation[:{max_eval_samples}]")
@@ -127,52 +146,58 @@ def train_fn(rank):
         if rank == 0:
             print(f"Train dataset size: {len(train_dataset)}")
             print(f"Eval dataset size: {len(eval_dataset)}")
-            # Ensure checkpoints folder exists
             os.makedirs("checkpoints", exist_ok=True)
 
-        # Setup distributed training
+        # Setup distributed samplers
         train_sampler = torch.utils.data.distributed.DistributedSampler(
-            train_dataset, num_replicas=world_size, rank=rank
+            train_dataset, 
+            num_replicas=world_size, 
+            rank=rank,
+            shuffle=True
         )
-        eval_sampler = torch.utils.data.distributed.DistributedSampler(
-            eval_dataset, num_replicas=world_size, rank=rank
-        )
-
-        # Calculate per-core batch size for optimal TPU utilization
-        per_core_batch_size = max(1, batch_size // world_size)
+        
+        # Calculate per-core batch size
+        per_core_batch_size = batch_size // world_size
+        if per_core_batch_size < 1:
+            per_core_batch_size = 1
+            
         if rank == 0:
             print(f"Per-core batch size: {per_core_batch_size}")
-            print(f"Total effective batch size: {per_core_batch_size * world_size}")
+            print(f"Effective global batch size: {per_core_batch_size * world_size}")
         
+        # Create data loaders with proper settings for TPU
         train_loader = DataLoader(
             train_dataset, 
             batch_size=per_core_batch_size, 
             sampler=train_sampler, 
             drop_last=True,
-            num_workers=0,
-            pin_memory=False  # TPU doesn't need pinned memory
+            num_workers=0,  # Critical: No multiprocessing workers on TPU
+            pin_memory=False,
+            persistent_workers=False
         )
-        eval_loader = DataLoader(
-            eval_dataset, 
-            batch_size=per_core_batch_size, 
-            sampler=eval_sampler,
-            num_workers=0,
-            pin_memory=False
-        )
+        
+        # Use ParallelLoader for optimal TPU performance
+        train_device_loader = pl.ParallelLoader(train_loader, [device])
 
         # Initialize model and training components
         if rank == 0:
-            print(f"Initializing model with {sum(p.numel() for p in QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).parameters()):,} parameters...")
+            total_params = sum(p.numel() for p in QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).parameters())
+            print(f"Initializing model with {total_params:,} parameters...")
         
         model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, len(train_loader)*epochs)
+        
+        total_steps = len(train_loader) * epochs
+        scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
         criterion = nn.CrossEntropyLoss()
 
         if rank == 0:
-            print(f"Starting training loop...")
+            print("Starting training loop...")
             print(f"Steps per epoch: {len(train_loader)}")
-            print(f"Total training steps: {len(train_loader) * epochs}")
+            print(f"Total training steps: {total_steps}")
+        
+        # Synchronize all processes before training
+        xm.rendezvous('training_start')
         
         global_step = 0
         best_loss = float('inf')
@@ -181,17 +206,18 @@ def train_fn(rank):
             model.train()
             train_sampler.set_epoch(epoch)
             epoch_loss = 0.0
-            epoch_start_time = time.time()
+            step_count = 0
             
             if rank == 0:
                 print(f"\n=== Epoch {epoch + 1}/{epochs} ===")
             
-            for batch_idx, batch in enumerate(train_loader):
+            # Use the device loader for optimal TPU performance
+            for batch_idx, batch in enumerate(train_device_loader.per_device_loader(device)):
                 try:
-                    input_ids = batch['input_ids'].to(device, non_blocking=True)
-                    attention_mask = batch['attention_mask'].to(device, non_blocking=True)
-                    start_positions = batch['start_positions'].to(device, non_blocking=True)
-                    end_positions = batch['end_positions'].to(device, non_blocking=True)
+                    input_ids = batch['input_ids']
+                    attention_mask = batch['attention_mask']
+                    start_positions = batch['start_positions']
+                    end_positions = batch['end_positions']
 
                     optimizer.zero_grad()
                     start_logits, end_logits = model(input_ids, mask=attention_mask)
@@ -201,18 +227,21 @@ def train_fn(rank):
                     loss = (start_loss + end_loss) / 2
                     
                     loss.backward()
+                    
+                    # Critical: Use XLA-specific gradient clipping and optimizer step
+                    xm.reduce_gradients(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                     xm.optimizer_step(optimizer)
                     scheduler.step()
                     
                     epoch_loss += loss.item()
+                    step_count += 1
                     global_step += 1
 
+                    # Periodic logging (reduce frequency to avoid overhead)
                     if global_step % eval_every_n_steps == 0 and rank == 0:
-                        avg_loss = epoch_loss / (batch_idx + 1)
-                        steps_per_sec = eval_every_n_steps / (time.time() - epoch_start_time) if batch_idx > 0 else 0
-                        print(f"Step {global_step:4d} | Loss: {loss.item():.4f} | Avg: {avg_loss:.4f} | Steps/sec: {steps_per_sec:.2f}")
-                        epoch_start_time = time.time()
+                        avg_loss = epoch_loss / step_count if step_count > 0 else 0
+                        print(f"Step {global_step:4d} | Loss: {loss.item():.4f} | Avg: {avg_loss:.4f}")
                 
                 except Exception as batch_e:
                     print(f"[Rank {rank}] Error in batch {batch_idx}: {batch_e}")
@@ -221,65 +250,73 @@ def train_fn(rank):
             # Synchronize all processes before epoch summary
             xm.rendezvous('epoch_end')
             
-            if rank == 0:
-                avg_epoch_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else 0
-                print(f"Epoch {epoch + 1} completed | Avg Loss: {avg_epoch_loss:.4f}")
+            # Calculate and report epoch statistics
+            if step_count > 0:
+                avg_epoch_loss = epoch_loss / step_count
                 
-                # Save periodic checkpoint
-                if (epoch + 1) % save_every_n_epochs == 0:
-                    ckpt_path = f"checkpoints/model_epoch{epoch + 1}.pt"
-                    torch.save(model.state_dict(), ckpt_path)
-                    print(f"Checkpoint saved: {ckpt_path}")
-
-                # Save best model so far
-                if avg_epoch_loss < best_loss:
-                    best_loss = avg_epoch_loss
-                    best_ckpt_path = f"checkpoints/best_model.pt"
-                    torch.save(model.state_dict(), best_ckpt_path)
-                    print(f"New best model saved: {best_ckpt_path}")
+                if rank == 0:
+                    print(f"Epoch {epoch + 1} completed | Avg Loss: {avg_epoch_loss:.4f}")
+                    
+                    # Save best model
+                    if avg_epoch_loss < best_loss:
+                        best_loss = avg_epoch_loss
+                        # Only rank 0 saves the model
+                        xm.save(model.state_dict(), "checkpoints/best_model.pt")
+                        print("New best model saved: checkpoints/best_model.pt")
+                    
+                    # Periodic checkpoint
+                    if (epoch + 1) % save_every_n_epochs == 0:
+                        ckpt_path = f"checkpoints/model_epoch{epoch + 1}.pt"
+                        xm.save(model.state_dict(), ckpt_path)
+                        print(f"Checkpoint saved: {ckpt_path}")
 
         # Save final model
         if rank == 0:
             final_ckpt_path = "checkpoints/final_transformer_model.pt"
-            torch.save(model.state_dict(), final_ckpt_path)
+            xm.save(model.state_dict(), final_ckpt_path)
             print(f"Final model saved: {final_ckpt_path}")
-
-        if rank == 0:
             print(f"\nTraining completed successfully!")
             print(f"Best loss achieved: {best_loss:.4f}")
             print(f"Total cores used: {world_size}")
 
     except Exception as e:
-        print(f"[Rank {rank}] Training failed with exception: {e}")
+        print(f"[Rank {xm.get_ordinal() if 'xm' in locals() else 'Unknown'}] Training failed: {e}")
         traceback.print_exc()
+        cleanup_resources()
+        raise
+
+def signal_handler(signum, frame):
+    """Handle termination signals gracefully"""
+    print(f"Received signal {signum}. Cleaning up...")
+    cleanup_resources()
+    sys.exit(1)
 
 if __name__ == "__main__":
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
     print("=== TPU v2-8 Training Configuration ===")
-    
-    # TPU v2-8 has 8 cores
-    tpu_cores = get_tpu_cores()
-    per_core_batch = batch_size // tpu_cores
-    
     print(f"TPU Type: v2-8")
-    print(f"TPU Cores: {tpu_cores}")
+    print(f"Expected TPU Cores: 8")
     print(f"Global batch size: {batch_size}")
-    print(f"Per-core batch size: {per_core_batch}")
-    print(f"Effective global batch: {per_core_batch * tpu_cores}")
-    
-    if per_core_batch < 1:
-        print("WARNING: Per-core batch size < 1. Increasing global batch size...")
-        batch_size = tpu_cores
-        per_core_batch = 1
-        print(f"Adjusted global batch size: {batch_size}")
+    print(f"Per-core batch size: {batch_size // 8}")
+    print(f"Effective global batch: {batch_size}")
     
     print(f"\n=== Starting TPU v2-8 Training ===")
     start_time = datetime.now()
+    
     try:
-        # Use all 8 cores of TPU v2-8
-        xmp.spawn(train_fn, args=())
+        # Use spawn with nprocs=8 for TPU v2-8
+        xmp.spawn(train_fn, nprocs=8, start_method='spawn')
         print(f"\nTraining completed successfully in {datetime.now() - start_time}")
-        print(f"Utilized all {tpu_cores} TPU v2-8 cores")
+        print("Utilized all 8 TPU v2-8 cores")
+        
     except Exception as e:
         print(f"Training failed: {e}")
         traceback.print_exc()
+        cleanup_resources()
         sys.exit(1)
+    
+    finally:
+        cleanup_resources()
