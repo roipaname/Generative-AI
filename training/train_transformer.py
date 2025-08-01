@@ -446,7 +446,7 @@ if __name__ == "__main__":
     print("\n=== Testing simple TPU functionality ===")
     try:
         import torch_xla.distributed.xla_multiprocessing as xmp
-        xmp.spawn(simple_train_fn, args=(), nprocs=8)
+        xmp.spawn(simple_train_fn, args=(), nprocs=1, start_method='spawn')
 
         print("Simple test passed!")
     except Exception as e:
