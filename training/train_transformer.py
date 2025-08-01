@@ -95,9 +95,11 @@ def simple_train_fn(rank):
         test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
         model(test_tensor)
         print(f"Process {rank}: simple test passed on device {device}")
+        
     except Exception as e:
         print(f"Process {rank}: simple test failed - {e}")
         traceback.print_exc()
+    return None
 
 def full_train_fn(rank):
     try:
@@ -160,5 +162,5 @@ if __name__ == "__main__":
 
     print("\n=== Starting full TPU training ===")
     start_time = datetime.now()
-    xmp.spawn(full_train_fn, args=(), nprocs=8, start_method='fork')
+    xmp.spawn(full_train_fn, args=(),  start_method='fork')
     print(f"Training completed in {datetime.now() - start_time}")
