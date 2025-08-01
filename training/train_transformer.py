@@ -156,7 +156,7 @@ def full_train_fn(rank):
 
 if __name__ == "__main__":
     print("\n=== Testing TPU connectivity and functionality ===")
-    xmp.spawn(simple_train_fn, args=(), nprocs=4, start_method='fork')
+    xmp.spawn(simple_train_fn, args=(), start_method='fork')
 
 
 
