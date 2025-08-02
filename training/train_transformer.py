@@ -253,8 +253,14 @@ if __name__ == "__main__":
     start_time = datetime.now()
     
     try:
-        # Single TPU core - use nprocs=1
-        xmp.spawn(train_fn, nprocs=8, start_method='fork')
+        num_devices = len(xm.get_xla_supported_devices())
+
+        if num_devices > 1:
+        # Run on all available TPU cores
+          xmp.spawn(train_fn, nprocs=num_devices, start_method="fork")
+        else:
+        # Only one core available – run directly
+         train_fn(0)
 
         print(f"\nTraining completed successfully in {datetime.now() - start_time}")
         print("Utilized single TPU core")
