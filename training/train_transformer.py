@@ -15,6 +15,8 @@ from datasets import load_dataset
 import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
+from torch_xla.distributed import parallel_loader as pl
+
 
 # Critical: Environment setup BEFORE any torch_xla imports
 os.environ["XLA_USE_SPMD"] = "1"
