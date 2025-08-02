@@ -265,7 +265,7 @@ if __name__ == "__main__":
     
     try:
         # Single TPU core - use nprocs=1
-        xmp.spawn(train_fn, nprocs=1, start_method='fork')
+        xmp.spawn(train_fn, nprocs=8, start_method='fork')
 
         print(f"\nTraining completed successfully in {datetime.now() - start_time}")
         print("Utilized single TPU core")
