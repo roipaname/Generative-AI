@@ -254,6 +254,7 @@ if __name__ == "__main__":
     
     try:
         num_devices = len(xm.get_xla_supported_devices())
+        print(num_devices)
 
         if num_devices > 1:
         # Run on all available TPU cores
