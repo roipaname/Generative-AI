@@ -99,76 +99,74 @@ def cleanup_resources():
         print(f"Warning: Error during cleanup: {e}")
 
 def train_fn(index):
-    """Single TPU core training function"""
+    """Multi-core TPU training function"""
+
     try:
-        # Initialize XLA device
+        # Set device for this process
         device = xm.xla_device()
-        print(f"Initialized on device: {device}")
-        
+        print(f"[Core {index}] Initialized on device: {device}")
+
         # Quick connectivity test
-        print("Running connectivity test...")
+        print(f"[Core {index}] Running connectivity test...")
         model_test = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
         test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
         test_output = model_test(test_tensor)
-        print(f"Connectivity test passed! Output shapes: {[x.shape for x in test_output]}")
-        
+        print(f"[Core {index}] Connectivity test passed! Output shapes: {[x.shape for x in test_output]}")
+
         # Clean up test objects
         del model_test, test_tensor, test_output
-        
-        # Load datasets and tokenizer
-        print("Loading datasets...")
+
+        # Load tokenizer and dataset (each process loads its own)
+        print(f"[Core {index}] Loading datasets...")
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", add_prefix_space=True)
         train_data = load_dataset("squad", split=f"train[:{max_train_samples}]")
         eval_data = load_dataset("squad", split=f"validation[:{max_eval_samples}]")
 
         train_dataset = EnhancedQADataset(train_data, tokenizer, max_len)
         eval_dataset = EnhancedQADataset(eval_data, tokenizer, max_len)
-        
-        print(f"Train dataset size: {len(train_dataset)}")
-        print(f"Eval dataset size: {len(eval_dataset)}")
-        os.makedirs("checkpoints", exist_ok=True)
 
-        # Create simple data loader (no distributed sampling needed for single core)
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=batch_size, 
-            shuffle=True,
-            drop_last=True,
-            num_workers=0,
-            pin_memory=False
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset,
+            num_replicas=xm.xrt_world_size(),
+            rank=xm.get_ordinal(),
+            shuffle=True
         )
 
-        # Initialize model and training components
-        total_params = sum(p.numel() for p in QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).parameters())
-        print(f"Initializing model with {total_params:,} parameters...")
-        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            sampler=train_sampler,
+            drop_last=True,
+            num_workers=0
+        )
+
+        # Wrap in ParallelLoader for multi-core
+        para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
+
+        os.makedirs("checkpoints", exist_ok=True)
+
         model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        
+
         total_steps = len(train_loader) * epochs
         scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
         criterion = nn.CrossEntropyLoss()
 
-        print("Starting training loop...")
-        print(f"Steps per epoch: {len(train_loader)}")
-        print(f"Total training steps: {total_steps}")
-        print(f"Batch size: {batch_size}")
-        
+        print(f"[Core {index}] Starting training loop...")
+
         global_step = 0
         best_loss = float('inf')
-        
+
         for epoch in range(epochs):
             model.train()
             epoch_loss = 0.0
             step_count = 0
-            
-            print(f"\n=== Epoch {epoch + 1}/{epochs} ===")
+
+            print(f"\n[Core {index}] === Epoch {epoch + 1}/{epochs} ===")
             epoch_start_time = time.time()
-            
-            # Simple iteration without ParallelLoader
-            for batch_idx, batch in enumerate(train_loader):
+
+            for batch_idx, batch in enumerate(para_train_loader):
                 try:
-                    # Move batch to device
                     input_ids = batch['input_ids'].to(device)
                     attention_mask = batch['attention_mask'].to(device)
                     start_positions = batch['start_positions'].to(device)
@@ -176,71 +174,60 @@ def train_fn(index):
 
                     optimizer.zero_grad()
                     start_logits, end_logits = model(input_ids, mask=attention_mask)
-                    
+
                     start_loss = criterion(start_logits, start_positions)
                     end_loss = criterion(end_logits, end_positions)
                     loss = (start_loss + end_loss) / 2
-                    
+
                     loss.backward()
-                    
-                    # For single TPU core, use regular optimizer step
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                    xm.optimizer_step(optimizer)  # Still use XLA optimizer step
+                    xm.optimizer_step(optimizer)
                     scheduler.step()
-                    
+
                     epoch_loss += loss.item()
                     step_count += 1
                     global_step += 1
 
-                    # Periodic logging
                     if global_step % eval_every_n_steps == 0:
                         avg_loss = epoch_loss / step_count if step_count > 0 else 0
-                        print(f"Step {global_step:4d}/{total_steps} | Batch {batch_idx:3d}/{len(train_loader)} | Loss: {loss.item():.4f} | Avg: {avg_loss:.4f}")
+                        print(f"[Core {index}] Step {global_step}/{total_steps} | Batch {batch_idx}/{len(train_loader)} | Loss: {loss.item():.4f} | Avg: {avg_loss:.4f}")
                         sys.stdout.flush()
-                
+
                 except Exception as batch_e:
-                    print(f"Error in batch {batch_idx}: {batch_e}")
+                    print(f"[Core {index}] Error in batch {batch_idx}: {batch_e}")
                     traceback.print_exc()
                     continue
-            
-            # Calculate and report epoch statistics
-            epoch_time = time.time() - epoch_start_time
-            if step_count > 0:
-                avg_epoch_loss = epoch_loss / step_count
-                
-                print(f"Epoch {epoch + 1} completed in {epoch_time:.1f}s | Steps: {step_count} | Avg Loss: {avg_epoch_loss:.4f}")
-                
-                # Save best model
+
+            # Log and save checkpoints only on master core
+            if xm.is_master_ordinal():
+                avg_epoch_loss = epoch_loss / step_count if step_count > 0 else float('inf')
+                print(f"[Core {index}] Epoch {epoch + 1} completed in {time.time() - epoch_start_time:.2f}s | Avg Loss: {avg_epoch_loss:.4f}")
+
                 if avg_epoch_loss < best_loss:
                     best_loss = avg_epoch_loss
                     torch.save(model.state_dict(), "checkpoints/best_model.pt")
-                    print(f"New best model saved: checkpoints/best_model.pt (Loss: {avg_epoch_loss:.4f})")
-                
-                # Periodic checkpoint
+                    print(f"[Core {index}] New best model saved!")
+
                 if (epoch + 1) % save_every_n_epochs == 0:
                     ckpt_path = f"checkpoints/model_epoch{epoch + 1}.pt"
                     torch.save(model.state_dict(), ckpt_path)
-                    print(f"Checkpoint saved: {ckpt_path}")
-                    
-                sys.stdout.flush()
-            else:
-                print(f"WARNING: Epoch {epoch + 1} had no training steps!")
-                
-            # Force XLA synchronization between epochs
+                    print(f"[Core {index}] Checkpoint saved: {ckpt_path}")
+
             xm.mark_step()
 
-        # Save final model
-        final_ckpt_path = "checkpoints/final_transformer_model.pt"
-        torch.save(model.state_dict(), final_ckpt_path)
-        print(f"Final model saved: {final_ckpt_path}")
-        print(f"\nTraining completed successfully!")
-        print(f"Best loss achieved: {best_loss:.4f}")
+        # Final save (master core only)
+        if xm.is_master_ordinal():
+            final_ckpt_path = "checkpoints/final_transformer_model.pt"
+            torch.save(model.state_dict(), final_ckpt_path)
+            print(f"[Core {index}] Final model saved.")
+            print(f"[Core {index}] Best loss: {best_loss:.4f}")
 
     except Exception as e:
-        print(f"Training failed: {e}")
+        print(f"[Core {index}] Training failed: {e}")
         traceback.print_exc()
         cleanup_resources()
         raise
+
 
 def signal_handler(signum, frame):
     """Handle termination signals gracefully"""
