@@ -39,5 +39,6 @@ class TransformerModel(nn.Module):
        if return_hidden:
          return x  # hidden states before projection
        return self.output_proj(x)
+       #update code to build own transformer
 
 

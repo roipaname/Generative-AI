@@ -12,31 +12,26 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 from datasets import load_dataset
 
-import torch_xla
-import torch_xla.core.xla_model as xm
-import torch_xla.distributed.xla_multiprocessing as xmp
-from torch_xla.distributed import parallel_loader as pl
-
-
-# Critical: Environment setup BEFORE any torch_xla imports
-os.environ["XLA_USE_SPMD"] = "1"
-os.environ["PJRT_DEVICE"] = "TPU"
+# GPU-specific environment setup
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["XLA_PERSISTENT_CACHE_DEVICE"] = "1"
-os.environ["XLA_CACHE_SIZE"] = "128MB"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # For debugging CUDA errors
 
-# Import model after appending project path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from models.transformer.QA_transformer import QA_TransformerModel
+# Import model - adjust path as needed for Colab
+# If your model is in a different location, modify this path
+try:
+    from models.transformer.QA_transformer import QA_TransformerModel
+except ImportError:
+    print("Warning: Could not import QA_TransformerModel. Please ensure the model file is available.")
+    # You may need to upload your model file to Colab or define it here
 
-# Hyperparameters optimized for multi-TPU
+# Hyperparameters optimized for GPU training
 vocab_size = 30522
 max_len = 384
 d_model = 512
 num_heads = 8
 d_ff = 2048
 num_layers = 6
-batch_size = 16  # Per-core batch size - total will be 16 * 8 = 128
+batch_size = 32  # Increased batch size for GPU (adjust based on GPU memory)
 epochs = 10
 lr = 2e-4
 warmup_steps = 500
@@ -93,35 +88,55 @@ class EnhancedQADataset(torch.utils.data.Dataset):
         }
 
 def cleanup_resources():
-    """Clean up TPU resources"""
+    """Clean up GPU resources"""
     try:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
     except Exception as e:
         print(f"Warning: Error during cleanup: {e}")
 
-def train_fn(index):
-    """Multi-core TPU training function"""
+def check_gpu():
+    """Check GPU availability and memory"""
+    if not torch.cuda.is_available():
+        print("ERROR: CUDA not available! Please enable GPU in Colab runtime.")
+        return False
+    
+    device_name = torch.cuda.get_device_name(0)
+    memory_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    print(f"GPU: {device_name}")
+    print(f"Total GPU Memory: {memory_total:.1f} GB")
+    
+    return True
+
+def train_model():
+    """GPU training function"""
     try:
-        # Set device for this process
-        device = xm.xla_device()
-        world_size = xm.xrt_world_size()
-        rank = xm.get_ordinal()
-        
-        print(f"[Core {index}] Rank {rank}/{world_size} initialized on device: {device}")
+        # Check GPU availability
+        if not check_gpu():
+            return
+            
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device}")
 
         # Quick connectivity test
-        print(f"[Core {index}] Running connectivity test...")
-        model_test = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
-        test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
-        test_output = model_test(test_tensor)
-        print(f"[Core {index}] Connectivity test passed! Output shapes: {[x.shape for x in test_output]}")
+        print("Running GPU connectivity test...")
+        try:
+            model_test = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
+            test_tensor = torch.randint(0, vocab_size, (2, max_len), dtype=torch.long).to(device)
+            test_output = model_test(test_tensor)
+            print(f"GPU connectivity test passed! Output shapes: {[x.shape for x in test_output]}")
+            
+            # Clean up test objects
+            del model_test, test_tensor, test_output
+            torch.cuda.empty_cache()
+            
+        except Exception as e:
+            print(f"GPU connectivity test failed: {e}")
+            return
 
-        # Clean up test objects
-        del model_test, test_tensor, test_output
-
-        # Load tokenizer and dataset (each process loads its own)
-        print(f"[Core {index}] Loading datasets...")
+        # Load tokenizer and dataset
+        print("Loading datasets...")
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", add_prefix_space=True)
         train_data = load_dataset("squad", split=f"train[:{max_train_samples}]")
         eval_data = load_dataset("squad", split=f"validation[:{max_eval_samples}]")
@@ -129,29 +144,29 @@ def train_fn(index):
         train_dataset = EnhancedQADataset(train_data, tokenizer, max_len)
         eval_dataset = EnhancedQADataset(eval_data, tokenizer, max_len)
 
-        # FIXED: Proper distributed sampler setup
-        train_sampler = torch.utils.data.distributed.DistributedSampler(
-            train_dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True,
-            drop_last=True  # Important: ensures all ranks have same number of batches
-        )
-
+        # Create data loaders
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
-            sampler=train_sampler,
+            shuffle=True,
             drop_last=True,
-            num_workers=0
+            num_workers=2,  # Use some parallel workers for data loading
+            pin_memory=True  # Faster GPU transfer
         )
 
-        # Wrap in ParallelLoader for multi-core
-        para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
+        eval_loader = DataLoader(
+            eval_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=2,
+            pin_memory=True
+        )
 
-        if xm.is_master_ordinal():
-            os.makedirs("checkpoints", exist_ok=True)
+        # Create checkpoints directory
+        os.makedirs("checkpoints", exist_ok=True)
 
+        # Initialize model, optimizer, and scheduler
         model = QA_TransformerModel(vocab_size, d_model, num_heads, d_ff, num_layers, max_len).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -159,7 +174,11 @@ def train_fn(index):
         scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
         criterion = nn.CrossEntropyLoss()
 
-        print(f"[Core {index}] Starting training loop. Expected {len(train_loader)} batches per epoch...")
+        print(f"Starting training loop. {len(train_loader)} batches per epoch...")
+        print(f"Total training steps: {total_steps}")
+        
+        # Check initial GPU memory
+        print(f"Initial GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
 
         global_step = 0
         best_loss = float('inf')
@@ -169,76 +188,142 @@ def train_fn(index):
             epoch_loss = 0.0
             step_count = 0
 
-            # FIXED: Set epoch for distributed sampler to ensure different shuffling each epoch
-            train_sampler.set_epoch(epoch)
-
-            print(f"\n[Core {index}] === Epoch {epoch + 1}/{epochs} ===")
+            print(f"\n=== Epoch {epoch + 1}/{epochs} ===")
             epoch_start_time = time.time()
 
-            for batch_idx, batch in enumerate(para_train_loader):
+            for batch_idx, batch in enumerate(train_loader):
                 try:
-                    input_ids = batch['input_ids'].to(device)
-                    attention_mask = batch['attention_mask'].to(device)
-                    start_positions = batch['start_positions'].to(device)
-                    end_positions = batch['end_positions'].to(device)
+                    # Move batch to GPU
+                    input_ids = batch['input_ids'].to(device, non_blocking=True)
+                    attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+                    start_positions = batch['start_positions'].to(device, non_blocking=True)
+                    end_positions = batch['end_positions'].to(device, non_blocking=True)
 
                     optimizer.zero_grad()
+                    
+                    # Forward pass
                     start_logits, end_logits = model(input_ids, mask=attention_mask)
 
+                    # Calculate loss
                     start_loss = criterion(start_logits, start_positions)
                     end_loss = criterion(end_logits, end_positions)
                     loss = (start_loss + end_loss) / 2
 
+                    # Backward pass
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                    xm.optimizer_step(optimizer)
+                    optimizer.step()
                     scheduler.step()
 
                     epoch_loss += loss.item()
                     step_count += 1
                     global_step += 1
 
-                    if global_step % eval_every_n_steps == 0 and xm.is_master_ordinal():
+                    # Logging
+                    if global_step % eval_every_n_steps == 0:
                         avg_loss = epoch_loss / step_count if step_count > 0 else 0
-                        print(f"[Core {index}] Step {global_step}/{total_steps} | Batch {batch_idx}/{len(train_loader)} | Loss: {loss.item():.4f} | Avg: {avg_loss:.4f}")
-                        sys.stdout.flush()
+                        gpu_memory = torch.cuda.memory_allocated() / 1024**3
+                        print(f"Step {global_step}/{total_steps} | Batch {batch_idx}/{len(train_loader)} | "
+                              f"Loss: {loss.item():.4f} | Avg: {avg_loss:.4f} | GPU: {gpu_memory:.2f}GB")
 
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        print(f"GPU OOM error at batch {batch_idx}. Trying to recover...")
+                        torch.cuda.empty_cache()
+                        optimizer.zero_grad()
+                        continue
+                    else:
+                        raise e
+                        
                 except Exception as batch_e:
-                    print(f"[Core {index}] Error in batch {batch_idx}: {batch_e}")
+                    print(f"Error in batch {batch_idx}: {batch_e}")
                     traceback.print_exc()
                     continue
 
-            # Synchronize all cores before logging
-            xm.mark_step()
-            
-            # Log and save checkpoints only on master core
-            if xm.is_master_ordinal():
-                avg_epoch_loss = epoch_loss / step_count if step_count > 0 else float('inf')
-                print(f"[Core {index}] Epoch {epoch + 1} completed in {time.time() - epoch_start_time:.2f}s | Avg Loss: {avg_epoch_loss:.4f} | Steps: {step_count}")
+            # Epoch completed
+            avg_epoch_loss = epoch_loss / step_count if step_count > 0 else float('inf')
+            epoch_time = time.time() - epoch_start_time
+            print(f"Epoch {epoch + 1} completed in {epoch_time:.2f}s | "
+                  f"Avg Loss: {avg_epoch_loss:.4f} | Steps: {step_count}")
 
-                if avg_epoch_loss < best_loss:
-                    best_loss = avg_epoch_loss
-                    torch.save(model.state_dict(), "checkpoints/best_model.pt")
-                    print(f"[Core {index}] New best model saved!")
+            # Save best model
+            if avg_epoch_loss < best_loss:
+                best_loss = avg_epoch_loss
+                torch.save(model.state_dict(), "checkpoints/best_model.pt")
+                print(f"New best model saved! Loss: {best_loss:.4f}")
 
-                if (epoch + 1) % save_every_n_epochs == 0:
-                    ckpt_path = f"checkpoints/model_epoch{epoch + 1}.pt"
-                    torch.save(model.state_dict(), ckpt_path)
-                    print(f"[Core {index}] Checkpoint saved: {ckpt_path}")
+            # Save periodic checkpoints
+            if (epoch + 1) % save_every_n_epochs == 0:
+                ckpt_path = f"checkpoints/model_epoch{epoch + 1}.pt"
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'loss': avg_epoch_loss,
+                    'global_step': global_step
+                }, ckpt_path)
+                print(f"Checkpoint saved: {ckpt_path}")
 
-        # Final save (master core only)
-        if xm.is_master_ordinal():
-            final_ckpt_path = "checkpoints/final_transformer_model.pt"
-            torch.save(model.state_dict(), final_ckpt_path)
-            print(f"[Core {index}] Final model saved.")
-            print(f"[Core {index}] Best loss: {best_loss:.4f}")
+            # Optional: Run evaluation
+            if epoch % 2 == 0:  # Evaluate every 2 epochs
+                model.eval()
+                eval_loss = 0.0
+                eval_steps = 0
+                
+                print("Running evaluation...")
+                with torch.no_grad():
+                    for eval_batch in eval_loader:
+                        try:
+                            input_ids = eval_batch['input_ids'].to(device, non_blocking=True)
+                            attention_mask = eval_batch['attention_mask'].to(device, non_blocking=True)
+                            start_positions = eval_batch['start_positions'].to(device, non_blocking=True)
+                            end_positions = eval_batch['end_positions'].to(device, non_blocking=True)
+
+                            start_logits, end_logits = model(input_ids, mask=attention_mask)
+                            start_loss = criterion(start_logits, start_positions)
+                            end_loss = criterion(end_logits, end_positions)
+                            loss = (start_loss + end_loss) / 2
+
+                            eval_loss += loss.item()
+                            eval_steps += 1
+                            
+                        except Exception as e:
+                            print(f"Error in evaluation batch: {e}")
+                            continue
+
+                avg_eval_loss = eval_loss / eval_steps if eval_steps > 0 else float('inf')
+                print(f"Evaluation Loss: {avg_eval_loss:.4f}")
+                
+                model.train()  # Switch back to training mode
+
+        # Final save
+        final_ckpt_path = "checkpoints/final_transformer_model.pt"
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'final_loss': best_loss,
+            'total_epochs': epochs,
+            'hyperparameters': {
+                'vocab_size': vocab_size,
+                'd_model': d_model,
+                'num_heads': num_heads,
+                'd_ff': d_ff,
+                'num_layers': num_layers,
+                'max_len': max_len,
+                'batch_size': batch_size,
+                'lr': lr
+            }
+        }, final_ckpt_path)
+        
+        print(f"\nTraining completed successfully!")
+        print(f"Final model saved: {final_ckpt_path}")
+        print(f"Best loss achieved: {best_loss:.4f}")
 
     except Exception as e:
-        print(f"[Core {index}] Training failed: {e}")
+        print(f"Training failed: {e}")
         traceback.print_exc()
         cleanup_resources()
         raise
-
 
 def signal_handler(signum, frame):
     """Handle termination signals gracefully"""
@@ -251,28 +336,22 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
-    # Get available devices
-    available_devices = xm.get_xla_supported_devices()
-    num_cores = len(available_devices)
-    
-    print("=== Multi-TPU Core Training Configuration ===")
-    print(f"Available TPU cores: {available_devices}")
-    print(f"Number of cores: {num_cores}")
-    print(f"Per-core batch size: {batch_size}")
-    print(f"Total effective batch size: {batch_size * num_cores}")
+    print("=== GPU Training Configuration ===")
+    print(f"Batch size: {batch_size}")
     print(f"Epochs: {epochs}")
     print(f"Learning rate: {lr}")
-    print(f"Max samples: {max_train_samples}")
+    print(f"Max train samples: {max_train_samples}")
+    print(f"Max eval samples: {max_eval_samples}")
+    print(f"Model parameters: d_model={d_model}, num_heads={num_heads}, num_layers={num_layers}")
     
-    print(f"\n=== Starting Multi-TPU Training on {num_cores} cores ===")
+    print(f"\n=== Starting GPU Training ===")
     start_time = datetime.now()
     
     try:
-        # FIXED: Always spawn with all available cores
-        xmp.spawn(train_fn, nprocs=num_cores, start_method="fork")
-
-        print(f"\nTraining completed successfully in {datetime.now() - start_time}")
-        print(f"Utilized {num_cores} TPU cores")
+        train_model()
+        
+        end_time = datetime.now()
+        print(f"\nTraining completed successfully in {end_time - start_time}")
         
     except Exception as e:
         print(f"Training failed: {e}")
@@ -282,3 +361,4 @@ if __name__ == "__main__":
     
     finally:
         cleanup_resources()
+        print("Resources cleaned up.")
