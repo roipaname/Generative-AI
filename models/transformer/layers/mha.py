@@ -122,5 +122,7 @@ ax.set_zlabel("Z")
 plt.title("3D Word Plot")
 plt.show()
 
+from importlib.metadata import version
 
+print("torch version:", version("torch"))
 
