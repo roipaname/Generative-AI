@@ -83,4 +83,44 @@ max_length = 4
 dataloader = create_dataloader(raw_text, batch_size=8, max_length=max_length, stride=max_length)
 
 
+import torch
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import numpy as np
+
+# Create a tensor with 7 rows and 3 columns for x, y, z coordinates
+input = torch.tensor([
+    [1, 2, 3],
+    [2, 3, 4],
+    [3, 4, 5],
+    [4, 5, 6],
+    [5, 6, 7],
+    [6, 7, 8],
+    [7, 8, 9]
+], dtype=torch.float)
+
+words = ["your", "journey", "starts", "here", "go", "for", "it"]
+
+# Split into x, y, z
+x_coords = input[:,0].numpy()
+y_coords = input[:, 1].numpy()
+z_coords = input[:, 2].numpy()
+print(x_coords)
+print(y_coords)
+print(z_coords)
+# Plotting
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+
+for x, y, z, word in zip(x_coords, y_coords, z_coords, words):
+    ax.scatter(x, y, z, color='blue')
+    ax.text(x, y, z, word, color='red')
+
+ax.set_xlabel("X")
+ax.set_ylabel("Y")
+ax.set_zlabel("Z")
+plt.title("3D Word Plot")
+plt.show()
+
+
 
